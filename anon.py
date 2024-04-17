@@ -40,21 +40,26 @@ def anonymize(text: str, entities: list = ENTITIES, operators: dict = OPERATORS)
         anonymized_text = anonymizer.anonymize(
             text=text, analyzer_results=results, operators=operators
         )
-    except Exception as e:
+    except Exception as e: # I'm not sure what kind of exception to expect here
         logger.error(f"Anonymization failed: {e}")
-        return text
+        raise e
+    
     return anonymized_text.text
 
 
-def anonymize_file(src: str, dest: str) -> None:
-    """Read a file from src, anonymize the contents, write to dest"""
+def anonymize_file(src: str, dest: str) -> bool:
+    """
+    Read a file from src, anonymize the contents, write to dest.
+    Returns True if successful, False otherwise.
+    """
     try:
         with open(src, "r") as f:
             text = f.read()
     except IOError as e:
         logger.error(f"Error reading file: {e}")
-        return
+        return False
 
+    success = True
     # go line by line and only anonymize comments
     multiline_comment = False
     anonymized_text = ""
@@ -62,7 +67,12 @@ def anonymize_file(src: str, dest: str) -> None:
         if "/*" in line:
             multiline_comment = True
         if multiline_comment or line.strip().startswith("//"):
-            line = anonymize(line)
+            try:
+                line = anonymize(line)
+            except Exception as e:
+                # let it slide, but note that something failed
+                success = False
+
         if "*/" in line:
             multiline_comment = False
 
@@ -74,19 +84,23 @@ def anonymize_file(src: str, dest: str) -> None:
             f.write(anonymized_text)
     except IOError as e:
         logger.error(f"Error writing file: {e}")
-        return
+        return False
+    
+    return success
 
 
-def process_archive(root: str, file: str, dest_root: str) -> None:
+def process_archive(root: str, file: str, dest_root: str) -> int:
     """
     Unpack the jar/zip to a temp directory and anonymize any java files.
     Compares source code to any included source files in the parent directory,
     does not copy from jar if the files are the same.
+
+    Returns the number of files anonymized without error.
     """
 
     # skip over any non-student jars
     if any(skip in file.lower() for skip in SKIP_JARS):
-        return
+        return 0
 
     jar_name = file.replace(".", "_")
     with zipfile.ZipFile(root / file, "r") as z:
@@ -108,17 +122,21 @@ def process_archive(root: str, file: str, dest_root: str) -> None:
                 os.remove(jarred_file)
 
     # finally, anonymize any remaining java files from the jar
-    copy_and_anon(TEMP_DIR / jar_name, dest_root / jar_name)
+    n_processed = copy_and_anon(TEMP_DIR / jar_name, dest_root / jar_name)
     # recursively delete temp unpacked files
     shutil.rmtree(TEMP_DIR / jar_name)
+    return n_processed
 
 
-def copy_and_anon(src: str, dest: str) -> None:
+def copy_and_anon(src: str, dest: str) -> int:
     """
     Walk a directory and anonymize all java files in it, saving to destination.
     Jar files are unpacked and any source files are also anonymized, then repacked.
     Other file types (data files, .class files, word documents, etc) are not copied.
+
+    Returns the number of files anonymized without error.
     """
+    n_processed = 0
     for root, dirs, files in os.walk(src):
         root = Path(root)
 
@@ -139,9 +157,11 @@ def copy_and_anon(src: str, dest: str) -> None:
                 # anonymize the file and write to dest
                 src_file = root / file
                 dest_file = dest_root / file
-                anonymize_file(src_file, dest_file)
+                if anonymize_file(src_file, dest_file):
+                    n_processed += 1
+
             elif file.endswith(".jar") or file.endswith(".zip"):
-                process_archive(root, file, dest_root)
+                n_processed += process_archive(root, file, dest_root)
             else:
                 # don't copy the file
                 logger.info(f"Skipping {root / file}, not java source code")
@@ -151,6 +171,8 @@ def copy_and_anon(src: str, dest: str) -> None:
         for dir in dirs:
             if not os.listdir(Path(root) / dir):
                 os.rmdir(Path(root) / dir)
+    
+    return n_processed
 
 
 def main() -> None:
@@ -177,8 +199,10 @@ def main() -> None:
     )
     logger.info(f"Anonymizing {sys.argv[1]} to {sys.argv[2]}")
     logger.info(f"Start time: {datetime.datetime.now()}")
-    copy_and_anon(sys.argv[1], dest_dir)
+    print("Anonymizing code, this may take a while...")
+    n_anon = copy_and_anon(sys.argv[1], dest_dir)
     logger.info(f"End time: {datetime.datetime.now()}")
+    print(f"{n_anon} anonymized files written to {sys.argv[2]}")
 
     # clean up the temp directory, should be empty at this point
     TEMP_DIR.rmdir()
