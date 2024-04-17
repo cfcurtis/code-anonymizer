@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "code-anonymizer"
+version = "2024.04.17"
+description = "Simple script to anonymize student programming assignments"
+readme = "README.md"
+authors = [
+    {name = "Charlotte Curtis", email = "ccurtis@mtroyal.ca"},
+]
+requires-python = ">=3.10"
+dependencies = [
+    "presidio-analyzer",
+    "presidio-anonymizer",
+]
+
+[project.scripts]
+code-anonymizer = "anon:main"

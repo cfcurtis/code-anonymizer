@@ -11,7 +11,7 @@ from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 
 # Directories and files that are unlikely to contain student code
-SKIP_DIRS = ["lib", "bin", "target", "out", "build", "dist", "classes", "resources"]
+SKIP_DIRS = ["lib", "bin", "build", "dist"]
 SKIP_JARS = ["junit", "hamcrest", "checkstyle", "gson"]
 
 TEMP_DIR = Path("temp")
@@ -153,10 +153,19 @@ def copy_and_anon(src: str, dest: str) -> None:
                 os.rmdir(Path(root) / dir)
 
 
-def main(src: str, dest: str) -> None:
+def main() -> None:
     """
-    Create the temp directory, set up logging, and call copy_and_anon.
+    Create the temp directory, set up logging, then start chewing through files.
     """
+    
+    if len(sys.argv) < 3:
+        print(f"Usage: {sys.argv[0]} <src> <dest>")
+        print("       where <src> is the root of all assignments to anonymize,")
+        print(
+            "       <dest> is the name of the directory to save the anonymized versions."
+        )
+        sys.exit(1)
+
     TEMP_DIR.mkdir(exist_ok=True)
     dest_dir = Path(sys.argv[2])
     dest_dir.mkdir(exist_ok=True)
@@ -166,7 +175,7 @@ def main(src: str, dest: str) -> None:
         encoding="utf-8",
         level=logging.INFO,
     )
-    logger.info(f"Anonymizing {src} to {dest}")
+    logger.info(f"Anonymizing {sys.argv[1]} to {sys.argv[2]}")
     logger.info(f"Start time: {datetime.datetime.now()}")
     copy_and_anon(sys.argv[1], dest_dir)
     logger.info(f"End time: {datetime.datetime.now()}")
@@ -176,12 +185,4 @@ def main(src: str, dest: str) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Usage: python3 anon.py <src> <dest>")
-        print("       where <src> is the root of all assignments to anonymize,")
-        print(
-            "       <dest> is the name of the directory to save the anonymized versions."
-        )
-        sys.exit(1)
-
-    main(sys.argv[1], sys.argv[2])
+    main()
