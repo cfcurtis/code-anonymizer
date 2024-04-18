@@ -5,15 +5,13 @@ import zipfile
 import shutil
 import datetime
 import filecmp
+import argparse
 
 from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 
-# Directories and files that are unlikely to contain student code
-SKIP_DIRS = ["lib", "bin", "build", "dist"]
-SKIP_JARS = ["junit", "hamcrest", "checkstyle", "gson"]
-
+# Global constants and singletons
 TEMP_DIR = Path("temp")
 ENTITIES = ["EMAIL_ADDRESS", "PERSON", "STUDENT_ID"]
 OPERATORS = {
@@ -40,10 +38,10 @@ def anonymize(text: str, entities: list = ENTITIES, operators: dict = OPERATORS)
         anonymized_text = anonymizer.anonymize(
             text=text, analyzer_results=results, operators=operators
         )
-    except Exception as e: # I'm not sure what kind of exception to expect here
+    except Exception as e:  # I'm not sure what kind of exception to expect here
         logger.error(f"Anonymization failed: {e}")
         raise e
-    
+
     return anonymized_text.text
 
 
@@ -85,11 +83,11 @@ def anonymize_file(src: str, dest: str) -> bool:
     except IOError as e:
         logger.error(f"Error writing file: {e}")
         return False
-    
+
     return success
 
 
-def process_archive(root: str, file: str, dest_root: str) -> int:
+def process_archive(root: str, file: str, dest_root: str, exclude: list) -> int:
     """
     Unpack the jar/zip to a temp directory and anonymize any java files.
     Compares source code to any included source files in the parent directory,
@@ -97,10 +95,6 @@ def process_archive(root: str, file: str, dest_root: str) -> int:
 
     Returns the number of files anonymized without error.
     """
-
-    # skip over any non-student jars
-    if any(skip in file.lower() for skip in SKIP_JARS):
-        return 0
 
     jar_name = file.replace(".", "_")
     with zipfile.ZipFile(root / file, "r") as z:
@@ -122,13 +116,13 @@ def process_archive(root: str, file: str, dest_root: str) -> int:
                 os.remove(jarred_file)
 
     # finally, anonymize any remaining java files from the jar
-    n_processed = copy_and_anon(TEMP_DIR / jar_name, dest_root / jar_name)
+    n_processed = copy_and_anon(TEMP_DIR / jar_name, dest_root / jar_name, exclude)
     # recursively delete temp unpacked files
     shutil.rmtree(TEMP_DIR / jar_name)
     return n_processed
 
 
-def copy_and_anon(src: str, dest: str) -> int:
+def copy_and_anon(src: str, dest: str, exclude: list) -> int:
     """
     Walk a directory and anonymize all java files in it, saving to destination.
     Jar files are unpacked and any source files are also anonymized, then repacked.
@@ -145,7 +139,8 @@ def copy_and_anon(src: str, dest: str) -> int:
         dest_root = Path(dest) / root.relative_to(src)
         dest_root.mkdir(exist_ok=True)
         for dir in dirs:
-            if dir.lower() in SKIP_DIRS:
+            ldir = dir.lower()
+            if any([x in ldir for x in exclude]):
                 dirs.remove(dir)
                 continue
             dest_dir = dest_root / dir
@@ -153,6 +148,11 @@ def copy_and_anon(src: str, dest: str) -> int:
 
         # go through the files and look for java or archives
         for file in files:
+            # skip over excluded files
+            lfile = file.lower()
+            if any([x in lfile for x in exclude]):
+                continue
+
             if file.endswith(".java"):
                 # anonymize the file and write to dest
                 src_file = root / file
@@ -161,7 +161,7 @@ def copy_and_anon(src: str, dest: str) -> int:
                     n_processed += 1
 
             elif file.endswith(".jar") or file.endswith(".zip"):
-                n_processed += process_archive(root, file, dest_root)
+                n_processed += process_archive(root, file, dest_root, exclude)
             else:
                 # don't copy the file
                 logger.info(f"Skipping {root / file}, not java source code")
@@ -171,7 +171,7 @@ def copy_and_anon(src: str, dest: str) -> int:
         for dir in dirs:
             if not os.listdir(Path(root) / dir):
                 os.rmdir(Path(root) / dir)
-    
+
     return n_processed
 
 
@@ -179,17 +179,26 @@ def main() -> None:
     """
     Create the temp directory, set up logging, then start chewing through files.
     """
-    
-    if len(sys.argv) < 3:
-        print(f"Usage: {sys.argv[0]} <src> <dest>")
-        print("       where <src> is the root of all assignments to anonymize,")
-        print(
-            "       <dest> is the name of the directory to save the anonymized versions."
-        )
-        sys.exit(1)
+
+    parser = argparse.ArgumentParser(
+        description="Anonymize comments in student coding assignments (in Java)",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("src", help="The root of all assignments to anonymize")
+    parser.add_argument(
+        "dest", help="The name of the directory to save the anonymized versions"
+    )
+    parser.add_argument(
+        "-x",
+        "--exclude",
+        help="A comma-separated list of directory or jar filenames to exclude (case-insensitive, partial match)",
+        default="lib,bin,build,dist,junit,hamcrest,checkstyle,gson",
+    )
+
+    args = parser.parse_args()
 
     TEMP_DIR.mkdir(exist_ok=True)
-    dest_dir = Path(sys.argv[2])
+    dest_dir = Path(args.dest)
     dest_dir.mkdir(exist_ok=True)
     logging.basicConfig(
         format="%(levelname)s: %(message)s",
@@ -197,12 +206,14 @@ def main() -> None:
         encoding="utf-8",
         level=logging.INFO,
     )
-    logger.info(f"Anonymizing {sys.argv[1]} to {sys.argv[2]}")
+    logger.info(f"Anonymizing {args.src} to {args.dest}")
     logger.info(f"Start time: {datetime.datetime.now()}")
     print("Anonymizing code, this may take a while...")
-    n_anon = copy_and_anon(sys.argv[1], dest_dir)
+
+    n_anon = copy_and_anon(args.src, dest_dir, args.exclude.lower().split(","))
+
     logger.info(f"End time: {datetime.datetime.now()}")
-    print(f"{n_anon} anonymized files written to {sys.argv[2]}")
+    print(f"{n_anon} anonymized files written to {args.dest}")
 
     # clean up the temp directory, should be empty at this point
     TEMP_DIR.rmdir()
