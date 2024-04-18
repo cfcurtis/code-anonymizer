@@ -180,6 +180,7 @@ def main() -> None:
     Create the temp directory, set up logging, then start chewing through files.
     """
 
+    default_exclude = "lib,bin,build,dist,junit,hamcrest,checkstyle,gson"
     parser = argparse.ArgumentParser(
         description="Anonymize comments in student coding assignments (in Java)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -192,10 +193,14 @@ def main() -> None:
         "-x",
         "--exclude",
         help="A comma-separated list of directory or jar filenames to exclude (case-insensitive, partial match)",
-        default="lib,bin,build,dist,junit,hamcrest,checkstyle,gson",
+        default=default_exclude,
     )
+    parser.add_argument("-a", "--append", help="Append excluded directories instead of replacing", action="store_true")
 
     args = parser.parse_args()
+
+    if args.append:
+        args.exclude = default_exclude + "," + args.exclude
 
     TEMP_DIR.mkdir(exist_ok=True)
     dest_dir = Path(args.dest)

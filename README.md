@@ -35,3 +35,12 @@ Note: this project depends on [Microsoft Presidio](https://microsoft.github.io/)
    python anon.py <src> <dest>
    ```
    where `<src>` is the path to the root directory containing assignments, and `<dest>` is the name of a new directory to create containing the anonymized versions.
+
+## Excluding Files
+To exclude directories or filenames from being processed (e.g. non-student files), pass the argument `--exclude` or `-x` followed by a comma-separated list of directories or files. The default value is:
+
+```bash
+lib,bin,build,dist,junit,hamcrest,checkstyle,gson
+```
+
+By default, this list will be **replaced** by any `-x` arguments. To append to the list, use the `--append` or `-a` flag.
