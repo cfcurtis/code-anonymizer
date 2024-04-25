@@ -97,8 +97,12 @@ def process_archive(root: str, file: str, dest_root: str, exclude: list) -> int:
     """
 
     jar_name = file.replace(".", "_")
-    with zipfile.ZipFile(root / file, "r") as z:
-        z.extractall(TEMP_DIR / jar_name)
+    try:
+        with zipfile.ZipFile(root / file, "r") as z:
+            z.extractall(TEMP_DIR / jar_name)
+    except zipfile.BadZipFile as e:
+        logger.warning(f"Could not unzip {root / file}, skipping: {e}")
+        return 0
 
     # go through the unpacked files and delete any that already exist
     for temp_root, _, files in os.walk(TEMP_DIR / jar_name):
@@ -180,7 +184,7 @@ def main() -> None:
     Create the temp directory, set up logging, then start chewing through files.
     """
 
-    default_exclude = "lib,bin,build,dist,junit,hamcrest,checkstyle,gson"
+    default_exclude = "lib,bin,build,dist,junit,hamcrest,checkstyle,gson,_MACOSX,.DS_Store"
     parser = argparse.ArgumentParser(
         description="Anonymize comments in student coding assignments (in Java)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -195,7 +199,7 @@ def main() -> None:
         help="A comma-separated list of directory or jar filenames to exclude (case-insensitive, partial match)",
         default=default_exclude,
     )
-    parser.add_argument("-a", "--append", help="Append excluded directories instead of replacing", action="store_true")
+    parser.add_argument("-a", "--append", help="Append excluded filenames instead of replacing", action="store_true")
 
     args = parser.parse_args()
 

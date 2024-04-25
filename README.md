@@ -40,7 +40,7 @@ Note: this project depends on [Microsoft Presidio](https://microsoft.github.io/)
 To exclude directories or filenames from being processed (e.g. non-student files), pass the argument `--exclude` or `-x` followed by a comma-separated list of directories or files. The default value is:
 
 ```bash
-lib,bin,build,dist,junit,hamcrest,checkstyle,gson
+lib,bin,build,dist,junit,hamcrest,checkstyle,gson,_MACOSX,.DS_Store
 ```
 
 By default, this list will be **replaced** by any `-x` arguments. To append to the list, use the `--append` or `-a` flag.
