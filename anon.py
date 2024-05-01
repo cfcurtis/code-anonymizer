@@ -20,6 +20,25 @@ OPERATORS = {
     "STUDENT_ID": OperatorConfig("replace", {"new_value": "00000000"}),
 }
 
+# not exactly constants, but defined at argparse time
+exclude = [
+    "lib",
+    "bin",
+    "build",
+    "dist",
+    "junit",
+    "hamcrest",
+    "checkstyle",
+    "gson",
+    "_MACOSX",
+    ".DS_Store",
+    ".git",
+    ".idea",
+    ".vscode",
+]
+
+compare_sizes = False
+
 # The analyzer and anonymizer engines are singletons, should be created once and reused
 analyzer = AnalyzerEngine()
 
@@ -53,7 +72,7 @@ def anonymize_file(src: str, dest: str) -> bool:
     try:
         with open(src, "r") as f:
             text = f.read()
-    except IOError as e:
+    except Exception as e:
         logger.error(f"Error reading file: {e}")
         return False
 
@@ -87,7 +106,27 @@ def anonymize_file(src: str, dest: str) -> bool:
     return success
 
 
-def process_archive(root: str, file: str, dest_root: str, exclude: list) -> int:
+def already_exists(student_root: str, file_path: str) -> bool:
+    """
+    Check if a file already exists somewhere in the student's directory.
+    Recursively search through the submission for the file.
+    """
+    file_path = Path(file_path)
+    filename = file_path.name
+    file_size = Path(file_path).stat().st_size
+    for target_root, _, files in os.walk(student_root):
+        if filename in files:
+            if compare_sizes:
+                target_size = (Path(target_root) / filename).stat().st_size
+                return abs(target_size - file_size) < 10  # allow for small differences
+            else:
+                return True
+                # just look at filename, assumes that students only have one actual file of each name
+
+    return False
+
+
+def process_archive(root: str, file: str, dest_root: str, student_root: str) -> int:
     """
     Unpack the jar/zip to a temp directory and anonymize any java files.
     Compares source code to any included source files in the parent directory,
@@ -104,29 +143,15 @@ def process_archive(root: str, file: str, dest_root: str, exclude: list) -> int:
         logger.warning(f"Could not unzip {root / file}, skipping: {e}")
         return 0
 
-    # go through the unpacked files and delete any that already exist
-    for temp_root, _, files in os.walk(TEMP_DIR / jar_name):
-        temp_root = Path(temp_root)
-        for file in files:
-            if not file.endswith(".java"):
-                continue
-            jarred_file = temp_root / file
-            uncorked_file = root / file
+    # anonymize the files in the jar, if they aren't already in the student's directory
+    n_processed = copy_and_anon(TEMP_DIR / jar_name, dest_root / jar_name, student_root)
 
-            if uncorked_file.exists() and filecmp.cmp(
-                jarred_file, uncorked_file, shallow=False
-            ):
-                # the files are the same, delete the temp file
-                os.remove(jarred_file)
-
-    # finally, anonymize any remaining java files from the jar
-    n_processed = copy_and_anon(TEMP_DIR / jar_name, dest_root / jar_name, exclude)
     # recursively delete temp unpacked files
     shutil.rmtree(TEMP_DIR / jar_name)
     return n_processed
 
 
-def copy_and_anon(src: str, dest: str, exclude: list) -> int:
+def copy_and_anon(src: str, dest: str, student_root: str = None) -> int:
     """
     Walk a directory and anonymize all java files in it, saving to destination.
     Jar files are unpacked and any source files are also anonymized, then repacked.
@@ -135,6 +160,7 @@ def copy_and_anon(src: str, dest: str, exclude: list) -> int:
     Returns the number of files anonymized without error.
     """
     n_processed = 0
+    in_zip = str(TEMP_DIR) in str(src)
     for root, dirs, files in os.walk(src):
         root = Path(root)
 
@@ -144,7 +170,7 @@ def copy_and_anon(src: str, dest: str, exclude: list) -> int:
         dest_root.mkdir(exist_ok=True)
         for dir in dirs:
             ldir = dir.lower()
-            if any([x in ldir for x in exclude]):
+            if exclude and any([x in ldir for x in exclude]):
                 dirs.remove(dir)
                 continue
             dest_dir = dest_root / dir
@@ -154,10 +180,23 @@ def copy_and_anon(src: str, dest: str, exclude: list) -> int:
         for file in files:
             # skip over excluded files
             lfile = file.lower()
-            if any([x in lfile for x in exclude]):
+            if exclude and any([x in lfile for x in exclude]):
                 continue
 
+            if student_root and not in_zip and student_root not in str(dest_root):
+                # we've moved out of the student's directory, reset to None
+                student_root = None
+
+            # The first time we find a java or jar file, assume it's the root of that
+            # student or group's directory
+            if not student_root and (file.endswith(".java") or file.endswith(".jar")):
+                student_root = str(dest_root)
+
             if file.endswith(".java"):
+                if already_exists(student_root, root / file):
+                    logger.info(f"Skipping {root / file}, already exists")
+                    continue
+
                 # anonymize the file and write to dest
                 src_file = root / file
                 dest_file = dest_root / file
@@ -165,7 +204,7 @@ def copy_and_anon(src: str, dest: str, exclude: list) -> int:
                     n_processed += 1
 
             elif file.endswith(".jar") or file.endswith(".zip"):
-                n_processed += process_archive(root, file, dest_root, exclude)
+                n_processed += process_archive(root, file, dest_root, student_root)
             else:
                 # don't copy the file
                 logger.info(f"Skipping {root / file}, not java source code")
@@ -183,8 +222,8 @@ def main() -> None:
     """
     Create the temp directory, set up logging, then start chewing through files.
     """
+    global compare_sizes, exclude
 
-    default_exclude = "lib,bin,build,dist,junit,hamcrest,checkstyle,gson,_MACOSX,.DS_Store"
     parser = argparse.ArgumentParser(
         description="Anonymize comments in student coding assignments (in Java)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -197,14 +236,32 @@ def main() -> None:
         "-x",
         "--exclude",
         help="A comma-separated list of directory or jar filenames to exclude (case-insensitive, partial match)",
-        default=default_exclude,
+        default="",
     )
-    parser.add_argument("-a", "--append", help="Append excluded filenames instead of replacing", action="store_true")
+    parser.add_argument(
+        "-a",
+        "--append",
+        help="Append excluded filenames instead of replacing",
+        action="store_true",
+    )
+    parser.add_argument(
+        "-s",
+        "--compare-sizes",
+        help="Compare file sizes to determine if a file is already anonymized",
+        action="store_true",
+        default=compare_sizes,
+    )
 
     args = parser.parse_args()
 
-    if args.append:
-        args.exclude = default_exclude + "," + args.exclude
+    # update the global args
+    if args.exclude:
+        if args.append:
+            exclude += args.exclude.lower().split(",")
+        else:
+            exclude = args.exclude.lower().split(",")
+
+    compare_sizes = args.compare_sizes
 
     TEMP_DIR.mkdir(exist_ok=True)
     dest_dir = Path(args.dest)
@@ -219,7 +276,7 @@ def main() -> None:
     logger.info(f"Start time: {datetime.datetime.now()}")
     print("Anonymizing code, this may take a while...")
 
-    n_anon = copy_and_anon(args.src, dest_dir, args.exclude.lower().split(","))
+    n_anon = copy_and_anon(args.src, dest_dir)
 
     logger.info(f"End time: {datetime.datetime.now()}")
     print(f"{n_anon} anonymized files written to {args.dest}")

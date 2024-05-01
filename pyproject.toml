@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "code-anonymizer"
-version = "2024.04.17"
+version = "2024.05.01"
 description = "Simple script to anonymize student programming assignments"
 readme = "README.md"
 authors = [
