@@ -2,15 +2,40 @@
 This repo contains a Python script to anonymize student code submissions. At the moment, it is hard-coded to process java files, and it only anonymizes information in comments (the most likely place for student identifying information).
 
 ## Overview
-Student submissions can be in any directory structure, including zip files. The script does the following:
-- Creates a destination directory
-- Recursively copies the directory structure of the source directory to the destination directory
-- Walks the source to find java files, anonymizing any comments, then writes the anonymized file to the corresponding destination
-- If a zip or jar file is encountered, it is extracted to a temp directory, processed, then copied over to the destination without re-packing. Any non-java files are ignored.
-- To try to avoid duplicate files, the following logic is used:
-   1. The first time a `.java` or `.jar` file is encountered, the parent directory is marked as a student's root directory
-   2. Once the root has been detected, any subsequent `.java` are compared with all other java files in the student's root (recursively). If the file exists, it is not re-copied.
-   3. By default, only the filename is compared. If the `-s` flag is passed, the file size is compared as well, with files within 10 bytes of each other considered duplicates.
+Student submissions need to be in a somewhat regular directory structure, with all submissions at the same level of nesting. Submissions may be in a directory for each student, or a zip/jar file. The level of nesting (relative to the top-level source) should be specified with the `-L` flag, which works the same way as the `tree` command.
+
+For example, given the following structure:
+```
+src
+├── class1
+|   ├── assignment1
+|   |   ├── student1
+|   |   |   ├── file1.java
+|   |   |   └── file2.java
+|   |   └── student2
+|   |   |   ├── file1.java
+|   |   |   └── file2.java
+|   |   └── student3.zip
+|   └── assignment2
+|       ├── student1.jar
+|       └── student2
+|           ├── file1.java
+```
+
+The level of nesting is 3 and the script should be run as:
+```bash
+$ code-anonymizer /path/to/src /path/to/dest -L 3
+```
+
+The output is a flat directory per student containing the anonymized java files only. Filenames are **assumed to be unique** within a student's directory, but not across students.
+
+The script does the following:
+- Creates the specified destination directory
+- Walks the source tree doing the following:
+   - Creates subdirectories in the destination for each submission
+   - Anonymizes the **comments** in java files, then writes the anonymized file to the corresponding destination (if not already extant).
+   - If a zip or jar file is encountered, it is extracted in-place, processed, then the unpacked directory is deleted. 
+- Any non-java files are ignored.
 
 ## Installation and Usage
 Note: this project depends on [Microsoft Presidio](https://microsoft.github.io/), which uses spaCy to detect identifying information such as names and student ids. This script will download the spaCy model `en_core_web_lg` the first time it is run, which is about 560MB.
@@ -43,15 +68,15 @@ Note: this project depends on [Microsoft Presidio](https://microsoft.github.io/)
 To exclude directories or filenames from being processed (e.g. non-student files), pass the argument `--exclude` or `-x` followed by a comma-separated list of directories or files. The default value is:
 
 ```bash
-lib,bin,build,dist,junit,hamcrest,checkstyle,gson,_MACOSX,.DS_Store,.git,.idea,.vscode
+lib,bin,build,dist,junit,hamcrest,checkstyle,gson,_MACOSX,.DS_Store,.git,.idea,.vscode,META-INF
 ```
 
 By default, this list will be **replaced** by any `-x` arguments. To append to the list, use the `--append` or `-a` flag.
 
 ## Argument summary
-```bash
-python anon.py -h
-usage: anon.py [-h] [-x EXCLUDE] [-a] [-s] src dest
+```
+$ python .\anon.py -h
+usage: anon.py [-h] [-x EXCLUDE] [-a] [-s] [-l LEVEL] src dest
 
 Anonymize comments in student coding assignments (in Java)
 
@@ -63,7 +88,8 @@ options:
   -h, --help            show this help message and exit
   -x EXCLUDE, --exclude EXCLUDE
                         A comma-separated list of directory or jar filenames to exclude (case-insensitive, partial match) (default:
-                        lib,bin,build,dist,junit,hamcrest,checkstyle,gson,_MACOSX,.DS_Store,.git,.idea,.vscode)
+                        lib,bin,build,dist,junit,hamcrest,checkstyle,gson,_MACOSX,.DS_Store,.git,.idea,.vscode,META-INF)
   -a, --append          Append excluded filenames instead of replacing (default: False)
-  -s, --compare-sizes   Compare file sizes to determine if a file is already anonymized (default: False)
+  -l LEVEL, --level LEVEL
+                        Define the nesting level of assignment directories (default: 3)
 ```
