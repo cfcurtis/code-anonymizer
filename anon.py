@@ -232,13 +232,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
     )
     parser.add_argument(
-        "-s",
-        "--compare-sizes",
-        help="Compare file sizes to determine if a file is already anonymized",
-        action="store_true",
-        default=False,
-    )
-    parser.add_argument(
         "-L",
         "--level",
         help="Define the nesting level of assignment directories relative to src",
