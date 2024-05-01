@@ -159,31 +159,32 @@ def copy_and_anon(args: argparse.Namespace) -> int:
 
     for root, _, files in os.walk(args.src):
         root = Path(root)
-
-        if submit_root and submit_root["src"] not in str(root):
-            # we've moved out of the student's directory, reset to None
-            submit_root = None
-
-        # The first time we hit a directory at the submit level, create a new anonymous directory.
-        # Path.parents always includes ".", so we need to add one to the comparison
-        if not submit_root and len(root.parents) == args.level + 1:
-            submit_root = {"src": str(root), "dest": ""}
-            named_path = Path(args.dest) / root.relative_to(args.src)
-            # rename the last directory to anonymous submission counter
-            submit_root["dest"] = named_path.parent / f"submission_{submit_num:02d}"
-            submit_num += 1
-            # create the anonymized directory
-            submit_root["dest"].mkdir(exist_ok=True, parents=True)
-            logger.info(f"Found new student directory, creating {submit_root['dest']}")
-
-        if not submit_root:
-            logger.warning(f"Skipping {root}, submission level not yet reached")
-            continue
-
         # now go through the files and look for java or archive files
         for file in files:
             if is_excluded(root / file, args.exclude):
                 continue
+
+            if submit_root and submit_root["src"] not in str(root):
+                # we've moved out of the student's directory, reset to None
+                submit_root = None
+
+            # The first time we hit a directory or archive at the submit level, create a new anonymous directory.
+            level = len(root.relative_to(args.src).parents)
+            if not submit_root and level == args.level:
+                submit_root = {"src": str(root), "dest": ""}
+                named_path = Path(args.dest) / root.relative_to(args.src)
+                # rename the last directory to anonymous submission counter
+                submit_root["dest"] = named_path.parent / f"submission_{submit_num:02d}"
+                submit_num += 1
+                # create the anonymized directory
+                submit_root["dest"].mkdir(exist_ok=True, parents=True)
+                logger.info(f"Found new submission directory, creating {submit_root['dest']}")
+            elif not submit_root and level == args.level - 1:
+                # could be zip files at the submission level
+                submit_root = {"src": str(root / file), "dest": Path(args.dest) / root.relative_to(args.src) / f"submission_{submit_num:02d}"}
+                submit_num += 1
+                submit_root["dest"].mkdir(exist_ok=True, parents=True)
+                logger.info(f"Found file at expected submission level, creating {submit_root['dest']}")
 
             if file.endswith(".java"):
                 if already_exists(submit_root["dest"], file):
@@ -238,11 +239,11 @@ def parse_args() -> argparse.Namespace:
         default=False,
     )
     parser.add_argument(
-        "-l",
+        "-L",
         "--level",
-        help="Define the nesting level of assignment directories",
+        help="Define the nesting level of assignment directories relative to src",
         type=int,
-        default=3,
+        default=1,
     )
 
     args = parser.parse_args()
