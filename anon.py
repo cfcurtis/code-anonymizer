@@ -236,7 +236,7 @@ def main() -> None:
         "-x",
         "--exclude",
         help="A comma-separated list of directory or jar filenames to exclude (case-insensitive, partial match)",
-        default="",
+        default=",".join(exclude),
     )
     parser.add_argument(
         "-a",
@@ -255,11 +255,10 @@ def main() -> None:
     args = parser.parse_args()
 
     # update the global args
-    if args.exclude:
-        if args.append:
-            exclude += args.exclude.lower().split(",")
-        else:
-            exclude = args.exclude.lower().split(",")
+    if args.append:
+        exclude += args.exclude.lower().split(",")
+    else:
+        exclude = args.exclude.lower().split(",")
 
     compare_sizes = args.compare_sizes
 
