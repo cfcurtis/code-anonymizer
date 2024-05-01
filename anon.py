@@ -1,10 +1,9 @@
-import sys, os
+import os
 from pathlib import Path
 import logging
 import zipfile
 import shutil
 import datetime
-import filecmp
 import argparse
 
 from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
@@ -12,32 +11,12 @@ from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 
 # Global constants and singletons
-TEMP_DIR = Path("temp")
 ENTITIES = ["EMAIL_ADDRESS", "PERSON", "STUDENT_ID"]
 OPERATORS = {
     "PERSON": OperatorConfig("replace", {"new_value": "<NAME>"}),
     "EMAIL_ADDRESS": OperatorConfig("replace", {"new_value": "anon@mtroyal.ca"}),
     "STUDENT_ID": OperatorConfig("replace", {"new_value": "00000000"}),
 }
-
-# not exactly constants, but defined at argparse time
-exclude = [
-    "lib",
-    "bin",
-    "build",
-    "dist",
-    "junit",
-    "hamcrest",
-    "checkstyle",
-    "gson",
-    "_MACOSX",
-    ".DS_Store",
-    ".git",
-    ".idea",
-    ".vscode",
-]
-
-compare_sizes = False
 
 # The analyzer and anonymizer engines are singletons, should be created once and reused
 analyzer = AnalyzerEngine()
@@ -70,10 +49,10 @@ def anonymize_file(src: str, dest: str) -> bool:
     Returns True if successful, False otherwise.
     """
     try:
-        with open(src, "r") as f:
+        with open(src, "r", encoding="UTF-8") as f:
             text = f.read()
     except Exception as e:
-        logger.error(f"Error reading file: {e}")
+        logger.error(f"Error reading file {src}: {e}")
         return False
 
     success = True
@@ -97,7 +76,7 @@ def anonymize_file(src: str, dest: str) -> bool:
         anonymized_text += line + "\n"
 
     try:
-        with open(dest, "w") as f:
+        with open(dest, "w", encoding="UTF-8") as f:
             f.write(anonymized_text)
     except IOError as e:
         logger.error(f"Error writing file: {e}")
@@ -106,111 +85,121 @@ def anonymize_file(src: str, dest: str) -> bool:
     return success
 
 
-def already_exists(student_root: str, file_path: str) -> bool:
+def already_exists(student_root: str, filename: str) -> bool:
     """
-    Check if a file already exists somewhere in the student's directory.
-    Recursively search through the submission for the file.
+    Check if a file already exists in the student's directory.
     """
-    file_path = Path(file_path)
-    filename = file_path.name
-    file_size = Path(file_path).stat().st_size
-    for target_root, _, files in os.walk(student_root):
-        if filename in files:
-            if compare_sizes:
-                target_size = (Path(target_root) / filename).stat().st_size
-                return abs(target_size - file_size) < 10  # allow for small differences
-            else:
-                return True
-                # just look at filename, assumes that students only have one actual file of each name
-
-    return False
+    return (Path(student_root) / filename).exists()
 
 
-def process_archive(root: str, file: str, dest_root: str, student_root: str) -> int:
+def is_excluded(filename: Path, exclude: list) -> bool:
     """
-    Unpack the jar/zip to a temp directory and anonymize any java files.
-    Compares source code to any included source files in the parent directory,
-    does not copy from jar if the files are the same.
+    Check if a file should be excluded based on the exclude list.
+    """
+    filename = str(filename)
+    return any([x in filename.lower() for x in exclude]) or not filename.endswith(
+        (".java", ".jar", ".zip")
+    )
+
+
+def process_archive(root: Path, archive: str, submit_root: dict, exclude: list) -> int:
+    """
+    Unpack the jar/zip in place and anonymize any java files that aren't already in the
+    submission destination directory.
 
     Returns the number of files anonymized without error.
     """
 
-    jar_name = file.replace(".", "_")
+    jar_name = archive.replace(".", "_")
     try:
-        with zipfile.ZipFile(root / file, "r") as z:
-            z.extractall(TEMP_DIR / jar_name)
+        with zipfile.ZipFile(root / archive, "r") as z:
+            z.extractall(root / jar_name)
     except zipfile.BadZipFile as e:
-        logger.warning(f"Could not unzip {root / file}, skipping: {e}")
+        logger.warning(f"Could not unzip {root / archive}, skipping: {e}")
         return 0
 
     # anonymize the files in the jar, if they aren't already in the student's directory
-    n_processed = copy_and_anon(TEMP_DIR / jar_name, dest_root / jar_name, student_root)
+    n_processed = 0
+    for jar_root, _, files in os.walk(root / jar_name):
+        jar_root = Path(jar_root)
+        for file in files:
+            # skip over excluded files
+            if is_excluded(str(jar_root / file), exclude):
+                continue
+
+            # recursively unpack nested archives
+            if file.endswith(".jar") or file.endswith(".zip"):
+                n_processed += process_archive(jar_root, file, submit_root, exclude)
+            else:  # process java files
+                if already_exists(submit_root["dest"], file):
+                    logger.info(f"Skipping {jar_root / file}, already exists")
+                else:
+                    src_file = jar_root / file
+                    dest_file = submit_root["dest"] / file
+                    if anonymize_file(src_file, dest_file):
+                        n_processed += 1
 
     # recursively delete temp unpacked files
-    shutil.rmtree(TEMP_DIR / jar_name)
+    shutil.rmtree(root / jar_name)
     return n_processed
 
 
-def copy_and_anon(src: str, dest: str, student_root: str = None) -> int:
+def copy_and_anon(args: argparse.Namespace) -> int:
     """
-    Walk a directory and anonymize all java files in it, saving to destination.
-    Jar files are unpacked and any source files are also anonymized, then repacked.
+    Walk a directory look for submissions at the given level. Anonymize any java files found
+    and write them to the anonymized submission directory as a flat structure.
+    Jar files are unpacked and any source files are also anonymized if they don't already exist.
     Other file types (data files, .class files, word documents, etc) are not copied.
 
     Returns the number of files anonymized without error.
     """
     n_processed = 0
-    in_zip = str(TEMP_DIR) in str(src)
-    for root, dirs, files in os.walk(src):
+    submit_num = 0
+    submit_root = None
+
+    for root, _, files in os.walk(args.src):
         root = Path(root)
 
-        # create the same directory structure in dest, skipping over
-        # anything that isn't likely to contain student code (lib, bin, etc)
-        dest_root = Path(dest) / root.relative_to(src)
-        dest_root.mkdir(exist_ok=True)
-        for dir in dirs:
-            ldir = dir.lower()
-            if exclude and any([x in ldir for x in exclude]):
-                dirs.remove(dir)
-                continue
-            dest_dir = dest_root / dir
-            dest_dir.mkdir(exist_ok=True)
+        if submit_root and submit_root["src"] not in str(root):
+            # we've moved out of the student's directory, reset to None
+            submit_root = None
 
-        # go through the files and look for java or archives
+        # The first time we hit a directory at the submit level, create a new anonymous directory.
+        # Path.parents always includes ".", so we need to add one to the comparison
+        if not submit_root and len(root.parents) == args.level + 1:
+            submit_root = {"src": str(root), "dest": ""}
+            named_path = Path(args.dest) / root.relative_to(args.src)
+            # rename the last directory to anonymous submission counter
+            submit_root["dest"] = named_path.parent / f"submission_{submit_num:02d}"
+            submit_num += 1
+            # create the anonymized directory
+            submit_root["dest"].mkdir(exist_ok=True, parents=True)
+            logger.info(f"Found new student directory, creating {submit_root['dest']}")
+
+        if not submit_root:
+            logger.warning(f"Skipping {root}, submission level not yet reached")
+            continue
+
+        # now go through the files and look for java or archive files
         for file in files:
-            # skip over excluded files
-            lfile = file.lower()
-            if exclude and any([x in lfile for x in exclude]):
+            if is_excluded(root / file, args.exclude):
                 continue
-
-            if student_root and not in_zip and student_root not in str(dest_root):
-                # we've moved out of the student's directory, reset to None
-                student_root = None
-
-            # The first time we find a java or jar file, assume it's the root of that
-            # student or group's directory
-            if not student_root and (file.endswith(".java") or file.endswith(".jar")):
-                student_root = str(dest_root)
 
             if file.endswith(".java"):
-                if already_exists(student_root, root / file):
+                if already_exists(submit_root["dest"], file):
                     logger.info(f"Skipping {root / file}, already exists")
-                    continue
-
-                # anonymize the file and write to dest
-                src_file = root / file
-                dest_file = dest_root / file
-                if anonymize_file(src_file, dest_file):
-                    n_processed += 1
+                else:
+                    # anonymize the file and write to dest
+                    src_file = root / file
+                    dest_file = Path(submit_root["dest"]) / file
+                    if anonymize_file(src_file, dest_file):
+                        n_processed += 1
 
             elif file.endswith(".jar") or file.endswith(".zip"):
-                n_processed += process_archive(root, file, dest_root, student_root)
-            else:
-                # don't copy the file
-                logger.info(f"Skipping {root / file}, not java source code")
+                n_processed += process_archive(root, file, submit_root, args.exclude)
 
     # clean up any empty directories
-    for root, dirs, files in os.walk(dest, topdown=False):
+    for root, dirs, files in os.walk(args.dest, topdown=False):
         for dir in dirs:
             if not os.listdir(Path(root) / dir):
                 os.rmdir(Path(root) / dir)
@@ -218,11 +207,8 @@ def copy_and_anon(src: str, dest: str, student_root: str = None) -> int:
     return n_processed
 
 
-def main() -> None:
-    """
-    Create the temp directory, set up logging, then start chewing through files.
-    """
-    global compare_sizes, exclude
+def parse_args() -> argparse.Namespace:
+    default_exclude = "lib,bin,build,dist,junit,hamcrest,checkstyle,gson,_MACOSX,.DS_Store,.git,.idea,.vscode,META-INF"
 
     parser = argparse.ArgumentParser(
         description="Anonymize comments in student coding assignments (in Java)",
@@ -236,7 +222,7 @@ def main() -> None:
         "-x",
         "--exclude",
         help="A comma-separated list of directory or jar filenames to exclude (case-insensitive, partial match)",
-        default=",".join(exclude),
+        default=default_exclude,
     )
     parser.add_argument(
         "-a",
@@ -249,20 +235,34 @@ def main() -> None:
         "--compare-sizes",
         help="Compare file sizes to determine if a file is already anonymized",
         action="store_true",
-        default=compare_sizes,
+        default=False,
+    )
+    parser.add_argument(
+        "-l",
+        "--level",
+        help="Define the nesting level of assignment directories",
+        type=int,
+        default=3,
     )
 
     args = parser.parse_args()
 
     # update the global args
     if args.append:
-        exclude += args.exclude.lower().split(",")
+        args.exclude = (default_exclude + "," + args.exclude).lower().split(",")
     else:
-        exclude = args.exclude.lower().split(",")
+        args.exclude = args.exclude.lower().split(",")
 
-    compare_sizes = args.compare_sizes
+    return args
 
-    TEMP_DIR.mkdir(exist_ok=True)
+
+def main() -> None:
+    """
+    Create the temp directory, set up logging, then start chewing through files.
+    """
+
+    args = parse_args()
+
     dest_dir = Path(args.dest)
     dest_dir.mkdir(exist_ok=True)
     logging.basicConfig(
@@ -275,13 +275,10 @@ def main() -> None:
     logger.info(f"Start time: {datetime.datetime.now()}")
     print("Anonymizing code, this may take a while...")
 
-    n_anon = copy_and_anon(args.src, dest_dir)
+    n_anon = copy_and_anon(args)
 
     logger.info(f"End time: {datetime.datetime.now()}")
     print(f"{n_anon} anonymized files written to {args.dest}")
-
-    # clean up the temp directory, should be empty at this point
-    TEMP_DIR.rmdir()
 
 
 if __name__ == "__main__":
