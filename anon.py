@@ -1,4 +1,4 @@
-import os
+import os, sys
 from pathlib import Path
 import logging
 import zipfile
@@ -22,7 +22,7 @@ OPERATORS = {
 analyzer = AnalyzerEngine()
 
 # define custom recognizer for student ID (9 digits)
-id_pattern = Pattern(name="student_id_pattern", regex="\d{8,10}", score=0.5)
+id_pattern = Pattern(name="student_id_pattern", regex=r"\d{8,10}", score=0.5)
 id_recognizer = PatternRecognizer(supported_entity="STUDENT_ID", patterns=[id_pattern])
 analyzer.registry.add_recognizer(id_recognizer)
 anonymizer = AnonymizerEngine()
@@ -52,8 +52,12 @@ def anonymize_file(src: str, dest: str) -> bool:
         with open(src, "r", encoding="UTF-8") as f:
             text = f.read()
     except Exception as e:
-        logger.error(f"Error reading file {src}: {e}")
-        return False
+        try:
+            with open(src, "r", encoding="cp1252") as f:
+                text = f.read()
+        except Exception as e:
+            logger.error(f"Error reading file {src}: {e}")
+            return False
 
     success = True
     # go line by line and only anonymize comments
@@ -101,6 +105,19 @@ def is_excluded(filename: Path, exclude: list) -> bool:
         (".java", ".jar", ".zip")
     )
 
+def unpack_in_place(archive: Path) -> str:
+    """
+    Unpacks the jar/zip in place, returns the new directory name if successful (None otherwise).
+    """
+    jar_name = Path(str(archive).replace(".", "_"))
+    try:
+        with zipfile.ZipFile(archive, "r") as z:
+            z.extractall(jar_name)
+    except zipfile.BadZipFile as e:
+        logger.warning(f"Could not unzip {archive}, skipping: {e}")
+        return None
+    
+    return jar_name
 
 def process_archive(root: Path, archive: str, submit_root: dict, exclude: list) -> int:
     """
@@ -109,18 +126,13 @@ def process_archive(root: Path, archive: str, submit_root: dict, exclude: list) 
 
     Returns the number of files anonymized without error.
     """
-
-    jar_name = archive.replace(".", "_")
-    try:
-        with zipfile.ZipFile(root / archive, "r") as z:
-            z.extractall(root / jar_name)
-    except zipfile.BadZipFile as e:
-        logger.warning(f"Could not unzip {root / archive}, skipping: {e}")
+    jar_name = unpack_in_place(root / archive)
+    if not jar_name:
         return 0
 
     # anonymize the files in the jar, if they aren't already in the student's directory
     n_processed = 0
-    for jar_root, _, files in os.walk(root / jar_name):
+    for jar_root, _, files in os.walk(jar_name):
         jar_root = Path(jar_root)
         for file in files:
             # skip over excluded files
@@ -140,8 +152,27 @@ def process_archive(root: Path, archive: str, submit_root: dict, exclude: list) 
                         n_processed += 1
 
     # recursively delete temp unpacked files
-    shutil.rmtree(root / jar_name)
+    shutil.rmtree(jar_name)
     return n_processed
+
+def unpack_assignments(src: Path, submit_level: int) -> list:
+    """
+    Unpack everything in place up to the submission level. Return the list of directories
+    created for subsequent cleanup.
+    """
+    dirs = []
+    for root, _, files in os.walk(src):
+        root = Path(root)
+        level = len(root.relative_to(src).parents)
+        if level < submit_level:
+            # go through the files and look for archives
+            for file in files:
+                if file.endswith(".jar") or file.endswith(".zip"):
+                    jar_name = unpack_in_place(root / file)
+                    if jar_name:
+                        dirs.append(jar_name)
+
+    return dirs
 
 
 def copy_and_anon(args: argparse.Namespace) -> int:
@@ -156,6 +187,7 @@ def copy_and_anon(args: argparse.Namespace) -> int:
     n_processed = 0
     submit_num = 0
     submit_root = None
+    temp_unpacked = unpack_assignments(Path(args.src), args.level)
 
     for root, _, files in os.walk(args.src):
         root = Path(root)
@@ -186,24 +218,31 @@ def copy_and_anon(args: argparse.Namespace) -> int:
                 submit_root["dest"].mkdir(exist_ok=True, parents=True)
                 logger.info(f"Found file at expected submission level, creating {submit_root['dest']}")
 
-            if file.endswith(".java"):
-                if already_exists(submit_root["dest"], file):
-                    logger.info(f"Skipping {root / file}, already exists")
-                else:
-                    # anonymize the file and write to dest
-                    src_file = root / file
-                    dest_file = Path(submit_root["dest"]) / file
-                    if anonymize_file(src_file, dest_file):
-                        n_processed += 1
+            # if we've already created the submission directory, process the files
+            if submit_root:
+                if file.endswith(".java"):
+                    if already_exists(submit_root["dest"], file):
+                        logger.info(f"Skipping {root / file}, already exists")
+                    else:
+                        # anonymize the file and write to dest
+                        src_file = root / file
+                        dest_file = Path(submit_root["dest"]) / file
+                        if anonymize_file(src_file, dest_file):
+                            n_processed += 1
 
-            elif file.endswith(".jar") or file.endswith(".zip"):
-                n_processed += process_archive(root, file, submit_root, args.exclude)
+                elif file.endswith(".jar") or file.endswith(".zip"):
+                    n_processed += process_archive(root, file, submit_root, args.exclude)
 
     # clean up any empty directories
     for root, dirs, files in os.walk(args.dest, topdown=False):
         for dir in dirs:
             if not os.listdir(Path(root) / dir):
                 os.rmdir(Path(root) / dir)
+    
+    # clean up any temporary directories
+    for temp_dir in temp_unpacked:
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
 
     return n_processed
 
@@ -265,6 +304,7 @@ def main() -> None:
         encoding="utf-8",
         level=logging.INFO,
     )
+    logger.info(f"Command: {' '.join(sys.argv)}")
     logger.info(f"Anonymizing {args.src} to {args.dest}")
     logger.info(f"Start time: {datetime.datetime.now()}")
     print("Anonymizing code, this may take a while...")
